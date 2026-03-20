@@ -73,13 +73,39 @@ Equivalent key args:
 --entropy-coef 0.00
 ```
 
+## Option C: Qwen3-4B + LoRA (FSDP, fewer GPUs)
+
+LoRA training with FSDP backend (no Megatron conversion):
+
+```bash
+cd slime
+bash ../openclaw-opd/run_qwen3_4b_openclaw_opd_topk_lora.sh
+```
+
+**Environment setup:** Create a conda env and install dependencies:
+
+```bash
+# From OpenClaw-RL repo root
+bash openclaw-opd/install_openclaw_opd_lora.sh
+conda activate openclaw-opd-lora
+```
+
+Or create env from YAML: `conda env create -f openclaw-opd/environment-openclaw-opd-lora.yml` then run the install script with that env active.
+
+Before running, set `HF_CKPT` to your Qwen3-4B path (e.g. download with `huggingface-cli download Qwen/Qwen3-4B --local-dir /path/to/Qwen3-4B`). The LoRA script uses `--ref-load` equal to `HF_CKPT` (no Megatron `torch_dist` needed). Default GPU layout: `NUM_GPUS=4`, `ACTOR_GPUS=2`, `ROLLOUT_GPUS=1`, `PRM_GPUS=1`; override as needed.
+
+**Note:** The top-K distillation loss in `topk_distillation_loss.py` imports `megatron.core.mpu`. The LoRA script uses `--train-backend fsdp`; the FSDP actor uses a built-in policy loss. If you need the custom top-K loss with this script, you may need Megatron-LM in `PYTHONPATH` or to use the Megatron-backed Top-K script (`run_qwen3_4b_openclaw_opd_topk.sh`) instead.
+
 ## File Layout
 
 ```text
 openclaw-opd/
 ├── README.md
+├── environment-openclaw-opd-lora.yml        # Conda env for LoRA (Python 3.10)
+├── install_openclaw_opd_lora.sh            # Install script for Qwen3-4B + LoRA
 ├── run_qwen3_4b_openclaw_opd.sh            # Token-level OPD (default)
 ├── run_qwen3_4b_openclaw_opd_topk.sh       # Top-K custom-loss path
+├── run_qwen3_4b_openclaw_opd_topk_lora.sh  # Top-K + LoRA (FSDP)
 ├── topk_distillation_loss.py               # Reverse-KL top-K loss (external custom loss)
 ├── openclaw_opd_api_server.py              # Async judge + teacher query + sample submission
 ├── openclaw_opd_rollout.py                 # Rollout bridge to SLIME trainer

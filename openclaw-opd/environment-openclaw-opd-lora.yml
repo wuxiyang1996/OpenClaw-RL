@@ -1,0 +1,12 @@
+# Conda environment for OpenClaw OPD with Qwen3-4B + LoRA
+# Usage: conda env create -f environment-openclaw-opd-lora.yml
+#        conda activate openclaw-opd-lora
+# Then run: bash install_openclaw_opd_lora.sh (with conda env active) or use the script to create+install.
+
+name: openclaw-opd-lora
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
