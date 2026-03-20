@@ -174,7 +174,8 @@ RUNTIME_ENV_JSON="{
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- "${PYTHON_EXE}" train_async.py \
+   --working-dir "${SLIME_ROOT}" \
+   -- "${PYTHON_EXE}" "${SLIME_ROOT}/train_async.py" \
    --train-backend fsdp \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node "${ACTOR_GPUS}" \
