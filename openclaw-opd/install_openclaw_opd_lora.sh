@@ -23,12 +23,13 @@ conda activate "${ENV_NAME}"
 # Upgrade pip
 pip install --upgrade pip
 
-# Install PyTorch with CUDA 12.4 (match your driver; cu121/cu124/cu128)
-pip install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# --- PyTorch with CUDA 12.8 ---
+# Match your driver: change cu128 to cu124 or cu121 if needed.
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128
 
-# Install slime dependencies (from slime/requirements.txt)
+# --- Core training dependencies (slime/requirements.txt + extras) ---
 pip install \
-  accelerate \
+  accelerate==1.13.0 \
   blobfile \
   datasets \
   "httpx[http2]" \
@@ -36,21 +37,35 @@ pip install \
   pillow \
   pylatexenc \
   pyyaml \
-  "ray[default]" \
+  "ray[default]==2.54.0" \
   tensorboard \
-  transformers \
+  transformers==4.57.1 \
   wandb
 
 # LoRA support
-pip install "peft>=0.12.0"
+pip install "peft>=0.18.0"
 
 # Flash attention: slime uses ring_flash_attn
 pip install ring_flash_attn 2>/dev/null || echo "WARN: ring_flash_attn failed (optional)"
 
-# SGLang for rollout (required by openclaw-opd and slime: sglang.srt.*)
-pip install "sglang-router>=0.2.3"
-# Full sglang package (not just sglang-router); repo-pinned ref to match OpenClaw-RL/requirements.txt. --no-deps avoids overwriting torch.
+# --- SGLang stack (rollout + inference engine) ---
+# sglang-router: load-balancing router
+pip install "sglang-router>=0.3.2"
+# Full sglang package (not just sglang-router); repo-pinned ref to match OpenClaw-RL.
+# --no-deps avoids overwriting torch.
 pip install "git+https://github.com/sgl-project/sglang.git@dce8b0606c06d3a191a24c7b8cbe8e238ab316c9#egg=sglang&subdirectory=python" --no-deps
+
+# flashinfer: required by sglang for attention backend (flashinfer is the default)
+pip install "flashinfer-python>=0.6.3"
+
+# xgrammar: required by sglang for constrained decoding / grammar backend
+pip install "xgrammar>=0.1.27"
+
+# outlines: alternative grammar backend used by sglang
+pip install outlines
+
+# --- OpenAI client (for sending requests to the OPD server) ---
+pip install openai
 
 # Optional for OPD API
 pip install qwen_vl_utils 2>/dev/null || true
@@ -60,7 +75,7 @@ cd "${SLIME_ROOT}"
 pip install -e . --no-deps
 cd "${REPO_ROOT}"
 
-# OpenClaw OPD API server deps (already in slime/requirements or common)
+# OpenClaw OPD API server deps
 pip install httpx fastapi uvicorn
 
 echo ""
