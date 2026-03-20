@@ -15,6 +15,11 @@ set -ex
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 
+# Skip sgl-kernel version check: sglang enforces >=0.3.21 at runtime, but 0.3.21
+# only ships SM100 binaries. On A100 (SM80) we need 0.3.20 which works but fails
+# the version gate. This env var is the official bypass (see engine.py line 846).
+export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1
+
 NUM_GPUS=${NUM_GPUS:-4}
 ACTOR_GPUS=${ACTOR_GPUS:-2}
 ROLLOUT_GPUS=${ROLLOUT_GPUS:-1}
@@ -40,6 +45,16 @@ REF_LOAD=${REF_LOAD:-${HF_CKPT}}
 SAVE_CKPT=${SAVE_CKPT:-${REPO_ROOT}/ckpt/qwen3-4b-openclaw-opd-topk-lora}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-${HF_CKPT}}
 
+# If HF_CKPT looks like a local path (absolute or ./ ../), ensure it exists and has config
+if [[ "${HF_CKPT}" == /* || "${HF_CKPT}" == ./* || "${HF_CKPT}" == ../* ]]; then
+  if [[ ! -d "${HF_CKPT}" || ! -f "${HF_CKPT}/config.json" ]]; then
+    echo "ERROR: HF checkpoint path not found or invalid: ${HF_CKPT}"
+    echo "  Directory must exist and contain config.json (e.g. from Qwen3-4B)."
+    echo "  Download with: huggingface-cli download Qwen/Qwen3-4B --local-dir ${HF_CKPT}"
+    exit 1
+  fi
+fi
+
 export SGLANG_API_KEY="${SGLANG_API_KEY}"
 export SERVED_MODEL_NAME="qwen3-4b"
 export HOST="0.0.0.0"
@@ -50,10 +65,10 @@ export TP="${TP:-1}"
 export CONTEXT_LENGTH="32768"
 export MEM_FRACTION_STATIC="0.85"
 export REASONING_PARSER="qwen3"
-export TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen25}"
+export TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen}"
 export PRM_M="${PRM_M:-3}"
 export OPENCLAW_OPD_TEACHER_LP_MAX_CONCURRENCY="${OPENCLAW_OPD_TEACHER_LP_MAX_CONCURRENCY:-3}"
-
+export ATTN_IMPL="${ATTN_IMPL:-sdpa}"
 
 CKPT_ARGS=(
    --hf-checkpoint "${HF_CKPT}"
@@ -77,10 +92,12 @@ ROLLOUT_ARGS=(
    --num-steps-per-rollout 1
 )
 
+# Default: sdpa (PyTorch built-in). Set ATTN_IMPL=flash_attention_2 if flash-attn is installed for ~10-20% speedup.
 PERF_ARGS=(
    --use-dynamic-batch-size
    --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-8192}"
    --gradient-checkpointing
+   --attn-implementation "${ATTN_IMPL}"
 )
 
 OPD_ARGS=(
@@ -140,16 +157,24 @@ export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 export no_proxy="127.0.0.1,${MASTER_ADDR}"
 ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus "${NUM_GPUS}" --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
+# Use same Python as current shell (e.g. conda env) so Ray workers see sglang and other deps
+PYTHON_EXE="${PYTHON_EXE:-$(which python3)}"
+if [[ -z "${PYTHON_EXE}" ]]; then
+  echo "ERROR: python3 not found. Activate the openclaw-opd-lora conda env and re-run."
+  exit 1
+fi
+
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"${SCRIPT_DIR}:${SLIME_ROOT}\",
-    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\"
+    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
+    \"SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK\": \"1\"
   }
 }"
 
 ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
-   -- python3 train_async.py \
+   -- "${PYTHON_EXE}" train_async.py \
    --train-backend fsdp \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node "${ACTOR_GPUS}" \

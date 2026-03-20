@@ -47,9 +47,10 @@ pip install "peft>=0.12.0"
 # Flash attention: slime uses ring_flash_attn
 pip install ring_flash_attn 2>/dev/null || echo "WARN: ring_flash_attn failed (optional)"
 
-# SGLang for rollout (required by openclaw-opd)
+# SGLang for rollout (required by openclaw-opd and slime: sglang.srt.*)
 pip install "sglang-router>=0.2.3"
-pip install sglang 2>/dev/null || pip install "sglang[all]" 2>/dev/null || echo "WARN: Install sglang from source if needed: cd sglang && pip install -e 'python[all]'"
+# Full sglang package (not just sglang-router); repo-pinned ref to match OpenClaw-RL/requirements.txt. --no-deps avoids overwriting torch.
+pip install "git+https://github.com/sgl-project/sglang.git@dce8b0606c06d3a191a24c7b8cbe8e238ab316c9#egg=sglang&subdirectory=python" --no-deps
 
 # Optional for OPD API
 pip install qwen_vl_utils 2>/dev/null || true

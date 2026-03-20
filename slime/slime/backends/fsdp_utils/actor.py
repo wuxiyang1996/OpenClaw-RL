@@ -73,22 +73,33 @@ class FSDPTrainRayActor(TrainRayActor):
 
         self.prof = TrainProfiler(args)
 
+        # When loading from a local directory, use local_files_only to avoid hub repo_id validation
+        _hf_path = self.args.hf_checkpoint
+        _local_only = os.path.isdir(_hf_path)
+
         for i in range(dist.get_world_size()):
             if i == dist.get_rank():
-                self.hf_config = AutoConfig.from_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
-                self.tokenizer = load_tokenizer(self.args.hf_checkpoint, trust_remote_code=True)
+                self.hf_config = AutoConfig.from_pretrained(
+                    _hf_path, trust_remote_code=True, local_files_only=_local_only
+                )
+                self.tokenizer = load_tokenizer(
+                    _hf_path, trust_remote_code=True, local_files_only=_local_only
+                )
                 # Vision models have `vision_config` in the config
                 if hasattr(self.hf_config, "vision_config"):
-                    self.processor = load_processor(self.args.hf_checkpoint, trust_remote_code=True)
+                    self.processor = load_processor(
+                        _hf_path, trust_remote_code=True, local_files_only=_local_only
+                    )
             dist.barrier(group=get_gloo_group())
 
         init_context = self._get_init_weight_context_manager()
 
         with init_context():
             model = self.get_model_cls().from_pretrained(
-                self.args.hf_checkpoint,
+                _hf_path,
                 trust_remote_code=True,
                 attn_implementation=self.args.attn_implementation,
+                local_files_only=_local_only,
             )
 
         model.train()
@@ -825,6 +836,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     ref_load_path,
                     trust_remote_code=True,
                     attn_implementation=self.args.attn_implementation,
+                    local_files_only=True,
                 )
 
             full_state = ref_model.state_dict()
