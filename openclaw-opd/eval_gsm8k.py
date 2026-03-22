@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -305,12 +306,34 @@ def generate_response(
     temperature: float = 0.0,
     max_tokens: int = 4096,
     model: str = "default",
+    training_mode: bool = False,
+    ground_truth: str | None = None,
 ) -> str:
-    """Send a GSM8K question to the model and get a response."""
+    """Send a GSM8K question to the model and get a response.
+
+    When *training_mode* is True the request includes OPD training headers
+    (``X-Session-ID``, ``X-Turn-Type``, ``X-Session-Done``) so that the
+    ``OpenClawOPDAPIServer`` proxy collects training samples.
+
+    OPD requires a second turn carrying the ground-truth answer as user
+    feedback so the PRM can evaluate the model's response (turn 1) and
+    produce a hint-enhanced teacher signal.
+    """
     messages = [
         {"role": "system", "content": GSM8K_SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
+
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    if "/v1/v1/" in url:
+        url = url.replace("/v1/v1/", "/v1/", 1)
+
+    headers: dict[str, str] = {}
+    session_id = None
+    if training_mode:
+        session_id = f"gsm8k-{uuid.uuid4().hex[:12]}"
+        headers["X-Session-ID"] = session_id
+        headers["X-Turn-Type"] = "main"
 
     payload = {
         "model": model,
@@ -318,18 +341,35 @@ def generate_response(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-
-    url = f"{base_url.rstrip('/')}/v1/chat/completions"
-    if "/v1/v1/" in url:
-        url = url.replace("/v1/v1/", "/v1/", 1)
-    resp = requests.post(
-        url,
-        json=payload,
-        timeout=180,
-    )
+    resp = requests.post(url, json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
-    content = resp.json()["choices"][0]["message"]["content"]
-    return strip_thinking(content)
+    raw_content = resp.json()["choices"][0]["message"]["content"]
+    answer_text = strip_thinking(raw_content)
+
+    if training_mode and ground_truth is not None:
+        messages.append({"role": "assistant", "content": raw_content})
+        messages.append({
+            "role": "user",
+            "content": f"The correct answer is {ground_truth}.",
+        })
+        turn2_headers = {
+            "X-Session-ID": session_id,
+            "X-Turn-Type": "main",
+            "X-Session-Done": "1",
+        }
+        turn2_payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.0,
+            "max_tokens": 16,
+        }
+        try:
+            resp2 = requests.post(url, json=turn2_payload, headers=turn2_headers, timeout=300)
+            resp2.raise_for_status()
+        except Exception:
+            pass
+
+    return answer_text
 
 
 def run_evaluation(args):
@@ -399,6 +439,8 @@ def run_evaluation(args):
         concurrency = getattr(args, "concurrency", 32)
         print(f"  Concurrency: {concurrency}\n")
 
+        training_mode = getattr(args, "training_mode", False)
+
         def _eval_one(idx: int, problem: dict) -> dict:
             question = problem["question"]
             ground_truth = problem["answer"]
@@ -409,6 +451,8 @@ def run_evaluation(args):
                     temperature=args.temperature,
                     max_tokens=args.max_tokens,
                     model=args.served_model_name,
+                    training_mode=training_mode,
+                    ground_truth=ground_truth if training_mode else None,
                 )
             except Exception as e:
                 return {"index": idx, "correct": False, "error": str(e)}
@@ -555,6 +599,15 @@ def main():
     eval_group.add_argument(
         "--output", type=str, default=None,
         help="Path to save results JSON (default: results/gsm8k_eval_results.json)",
+    )
+    eval_group.add_argument(
+        "--training-mode", action="store_true", default=False,
+        help=(
+            "Send OPD training headers (X-Session-ID, X-Turn-Type, X-Session-Done) "
+            "and a second turn with the ground-truth answer so the OpenClawOPDAPIServer "
+            "collects training samples.  Use when pointing --api-base at a running "
+            "dual-LoRA training server."
+        ),
     )
 
     args = parser.parse_args()

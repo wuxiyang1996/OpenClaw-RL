@@ -11,6 +11,9 @@
 #   # Against running dual-LoRA server (adapter A):
 #   API_BASE=http://localhost:30000/v1 bash openclaw-opd/run_gsm8k_easy_eval.sh
 #
+#   # Feed training data into a running dual-LoRA server (adapter A):
+#   API_BASE=http://localhost:30000/v1 TRAINING_MODE=1 bash openclaw-opd/run_gsm8k_easy_eval.sh
+#
 #   # Evaluate a specific checkpoint:
 #   ADAPTER_PATH=/path/to/ckpt/iter_0000003/model bash openclaw-opd/run_gsm8k_easy_eval.sh
 #

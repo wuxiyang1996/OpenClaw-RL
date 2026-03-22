@@ -602,7 +602,7 @@ class OpenClawOPDAPIServer:
         selected = _select_best_hint(votes)
         votes_display = [v.get("score", "fail") for v in votes]
 
-        if selected is None:
+        if selected is None and not self._use_topk_distillation:
             logger.info(
                 "%s[OpenClaw-OPD] session=%s turn=%d no valid hint (votes=%s), sample dropped%s",
                 _CYAN,
@@ -622,20 +622,24 @@ class OpenClawOPDAPIServer:
             )
             return {"accepted": False, "teacher_log_probs": None, "hint": "", "votes": votes, "eval_score": eval_score}
 
-        hint = selected["hint"].strip()
-        enhanced_messages = _append_hint_to_messages(turn_data["messages"], hint)
-        norm_enhanced = _normalize_messages_for_template(enhanced_messages)
-        enhanced_prompt_text = self.tokenizer.apply_chat_template(
-            norm_enhanced,
-            tools=turn_data.get("tools"),
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        hint = selected["hint"].strip() if selected else ""
 
-        enhanced_full_text = enhanced_prompt_text + turn_data["response_text"]
-        enhanced_ids = self.tokenizer(enhanced_full_text, add_special_tokens=False)["input_ids"]
+        if hint:
+            enhanced_messages = _append_hint_to_messages(turn_data["messages"], hint)
+            norm_enhanced = _normalize_messages_for_template(enhanced_messages)
+            teacher_prompt_text = self.tokenizer.apply_chat_template(
+                norm_enhanced,
+                tools=turn_data.get("tools"),
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            teacher_prompt_text = turn_data["prompt_text"]
+
+        teacher_full_text = teacher_prompt_text + turn_data["response_text"]
+        teacher_ids = self.tokenizer(teacher_full_text, add_special_tokens=False)["input_ids"]
         response_len = len(turn_data["response_ids"])
-        teacher_log_probs = await self._compute_teacher_log_probs(enhanced_ids, response_len)
+        teacher_log_probs = await self._compute_teacher_log_probs(teacher_ids, response_len)
 
         result: dict[str, Any] = {
             "accepted": True,
@@ -646,7 +650,7 @@ class OpenClawOPDAPIServer:
         }
 
         if self._use_topk_distillation:
-            topk_lp, topk_idx = await self._compute_teacher_topk_logprobs(enhanced_ids, response_len)
+            topk_lp, topk_idx = await self._compute_teacher_topk_logprobs(teacher_ids, response_len)
             result["teacher_topk_log_probs"] = topk_lp
             result["teacher_topk_indices"] = topk_idx
 

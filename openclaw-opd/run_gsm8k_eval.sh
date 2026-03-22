@@ -53,6 +53,7 @@ CONCURRENCY="${CONCURRENCY:-32}"              # parallel requests
 TEMPERATURE="${TEMPERATURE:-0.0}"
 MAX_TOKENS="${MAX_TOKENS:-4096}"
 DATASET="${DATASET:-}"                         # empty = HuggingFace; or path to local JSON
+TRAINING_MODE="${TRAINING_MODE:-}"            # set to "1" to send OPD training headers
 OUTPUT="${OUTPUT:-${SCRIPT_DIR}/results/gsm8k_${DIFFICULTY}_eval_results.json}"
 
 export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1
@@ -105,6 +106,10 @@ if [[ -n "${DATASET}" ]]; then
   PYTHON_ARGS+=(--dataset "${DATASET}")
 fi
 
+if [[ "${TRAINING_MODE}" == "1" ]]; then
+  PYTHON_ARGS+=(--training-mode)
+fi
+
 echo "============================================================"
 echo "  GSM8K Evaluation for OpenClaw-OPD LoRA"
 echo "============================================================"
@@ -113,6 +118,7 @@ echo "  Base model:    ${MERGED_MODEL:-${HF_CKPT}}"
 echo "  Checkpoint:    ${ADAPTER_PATH:-${CKPT_DIR} (latest)}"
 echo "  Num problems:  ${NUM_PROBLEMS}"
 echo "  Temperature:   ${TEMPERATURE}"
+echo "  Training mode: ${TRAINING_MODE:-off}"
 echo "  Output:        ${OUTPUT}"
 echo "============================================================"
 echo
