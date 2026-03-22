@@ -2,6 +2,10 @@
 
 Online distillation for agentic tool-use: use next-turn feedback to extract hindsight hints, build a stronger teacher signal, and train the student policy on-policy.
 
+> **Quick start:** See [`docs/use-cases.md`](docs/use-cases.md) for
+> copy-paste-ready command sequences, or [`docs/usage-guide.md`](docs/usage-guide.md)
+> for the full reference covering all options and configuration.
+
 ## Core Pipeline
 
 For each main-line turn:
@@ -129,6 +133,43 @@ The script checks that a local `HF_CKPT` path exists and contains `config.json`;
 
 **Note:** The top-K distillation loss in `topk_distillation_loss.py` imports `megatron.core.mpu`. The LoRA script uses `--train-backend fsdp`; the FSDP actor uses a built-in policy loss. If you need the custom top-K loss with this script, you may need Megatron-LM in `PYTHONPATH` or to use the Megatron-backed Top-K script (`run_qwen3_4b_openclaw_opd_topk.sh`) instead.
 
+## Option D: Federated Dual-LoRA (two adapters, 4 GPUs)
+
+Train two distinct LoRA adapters on a single 4-GPU Ray job. Each adapter receives user messages from a different API port with strict serving separation — requests to port A always get responses from LoRA A, requests to port B always get responses from LoRA B.
+
+Both adapters share the same base model, LoRA rank/alpha, and training config. SGLang serves both via native multi-LoRA; the FSDP actor trains both each step (sequential forward/backward, single `optimizer.step()`).
+
+### Run
+
+```bash
+conda activate openclaw-opd-lora
+cd slime
+bash ../openclaw-opd/run_qwen3_4b_openclaw_opd_topk_dual_lora.sh
+```
+
+Override ports and adapter names:
+
+```bash
+PORT_A=30000 PORT_B=30001 \
+ADAPTER_NAME_A=client_x ADAPTER_NAME_B=client_y \
+  bash ../openclaw-opd/run_qwen3_4b_openclaw_opd_topk_dual_lora.sh
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT_A` | 30000 | API port for adapter A |
+| `PORT_B` | 30001 | API port for adapter B |
+| `ADAPTER_NAME_A` | `lora_a` | PEFT adapter name for A |
+| `ADAPTER_NAME_B` | `lora_b` | PEFT adapter name for B |
+| `LORA_RANK` | 16 | LoRA rank (both adapters) |
+| `LORA_ALPHA` | 32 | LoRA alpha (both adapters) |
+
+GPU layout is the same as single-LoRA: `ACTOR_GPUS=2`, `ROLLOUT_GPUS=1`, `PRM_GPUS=1` (4 total).
+
+See [`README-federated-opd.md`](README-federated-opd.md) for full architecture details, and [`docs/federated-dual-lora-patches.md`](docs/federated-dual-lora-patches.md) for code-level patch documentation.
+
 ## Sending Requests (Producing OPD Samples)
 
 The OPD server exposes an **OpenAI-compatible** chat completions API. It does not accept raw training samples; instead it creates them internally from multi-turn conversations. Each `main` turn is evaluated by the PRM when the next user message arrives, and accepted turns become OPD training samples.
@@ -234,18 +275,53 @@ resp2 = client.chat.completions.create(
 - **503 during weight updates.** The server briefly returns 503 while syncing new weights to SGLang — retry after a short delay.
 - **PRM gating.** Not every turn produces a sample; the PRM judge must accept the turn (successful hint extraction) for it to enter the training queue.
 
+## Evaluation
+
+Two GSM8K evaluation scripts are provided — **easy** (original) and **hard** (larger numbers):
+
+```bash
+# Run both in parallel
+PORT=30050 bash openclaw-opd/run_gsm8k_easy_eval.sh &
+PORT=30051 bash openclaw-opd/run_gsm8k_hard_eval.sh &
+wait
+```
+
+Or point at an already-running training server:
+
+```bash
+API_BASE=http://localhost:30000/v1 bash openclaw-opd/run_gsm8k_easy_eval.sh &
+API_BASE=http://localhost:30001/v1 bash openclaw-opd/run_gsm8k_hard_eval.sh &
+wait
+```
+
+See [`docs/gsm8k-evaluation.md`](docs/gsm8k-evaluation.md) for full details.
+
 ## File Layout
 
 ```text
 openclaw-opd/
 ├── README.md
-├── environment-openclaw-opd-lora.yml        # Conda env for LoRA (Python 3.10)
-├── install_openclaw_opd_lora.sh            # Install script for Qwen3-4B + LoRA
-├── run_qwen3_4b_openclaw_opd.sh            # Token-level OPD (default)
-├── run_qwen3_4b_openclaw_opd_topk.sh       # Top-K custom-loss path
-├── run_qwen3_4b_openclaw_opd_topk_lora.sh  # Top-K + LoRA (FSDP)
-├── topk_distillation_loss.py               # Reverse-KL top-K loss (external custom loss)
-├── openclaw_opd_api_server.py              # Async judge + teacher query + sample submission
-├── openclaw_opd_rollout.py                 # Rollout bridge to SLIME trainer
-└── results/                                # Runtime records (auto-created)
+├── README-federated-opd.md                      # Federated dual-LoRA documentation
+├── environment-openclaw-opd-lora.yml            # Conda env for LoRA (Python 3.10)
+├── install_openclaw_opd_lora.sh                 # Install script for Qwen3-4B + LoRA
+├── run_qwen3_4b_openclaw_opd.sh                 # Token-level OPD (default)
+├── run_qwen3_4b_openclaw_opd_topk.sh            # Top-K custom-loss path
+├── run_qwen3_4b_openclaw_opd_topk_lora.sh       # Top-K + LoRA (FSDP, single adapter)
+├── run_qwen3_4b_openclaw_opd_topk_dual_lora.sh  # Top-K + dual LoRA (FSDP, federated)
+├── merge_lora_adapters.py                       # Weighted average of LoRA adapters
+├── run_merge_lora_adapters.sh                   # Shell wrapper for merge
+├── eval_gsm8k.py                                # GSM8K evaluation (easy + hard)
+├── run_gsm8k_eval.sh                            # Base eval script
+├── run_gsm8k_easy_eval.sh                       # Eval: openai/gsm8k (original)
+├── run_gsm8k_hard_eval.sh                       # Eval: reasoning-machines/gsm-hard
+├── topk_distillation_loss.py                    # Reverse-KL top-K loss (external custom loss)
+├── openclaw_opd_api_server.py                   # Async judge + teacher query + sample submission
+├── openclaw_opd_rollout.py                      # Rollout bridge (supports dual-server mode)
+├── docs/
+│   ├── use-cases.md                             # Copy-paste use cases (start here)
+│   ├── usage-guide.md                           # Full usage reference
+│   ├── training-errors-deep-dive.md             # Error root-cause analysis
+│   ├── federated-dual-lora-patches.md           # Code patches for dual-LoRA
+│   └── gsm8k-evaluation.md                      # Easy/hard eval documentation
+└── results/                                     # Runtime records (auto-created)
 ```

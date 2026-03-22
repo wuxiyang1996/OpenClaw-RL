@@ -43,7 +43,7 @@ Note that only `Linear` and `GroupLinear` layers in TransformerEngine use fp8 fo
 3. Start FP8 training with
 
 ```bash
-# Qwen3-4B Int4 training
+# Qwen3-4B FP8 training
 bash scripts/low_precision/run-qwen3-4b-fp8.sh
 
 # Qwen3-30B-A3B (2 nodes)

@@ -716,6 +716,9 @@ class RolloutManager:
         if "teacher_topk_indices" in samples[0].__dict__:
             train_data["teacher_topk_indices"] = [sample.teacher_topk_indices for sample in samples]
 
+        if any(s.adapter_name is not None for s in samples):
+            train_data["adapter_names"] = [s.adapter_name for s in samples]
+
         return train_data
 
     def set_train_parallel_config(self, config: dict):
@@ -771,6 +774,7 @@ class RolloutManager:
                 "step_wise_step_token_spans",
                 "step_wise_step_indices",
                 "group_indices",
+                "adapter_names",
             ]:
                 if key not in data:
                     continue

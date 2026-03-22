@@ -244,10 +244,11 @@ async def generate(args, sample: Sample, sampling_params, evaluation: bool = Fal
 
 
 class OpenClawOPDAPIServer:
-    def __init__(self, args, output_queue: queue.Queue, submission_enabled: threading.Event):
+    def __init__(self, args, output_queue: queue.Queue, submission_enabled: threading.Event, adapter_name: str | None = None):
         self.args = args
         self.output_queue = output_queue
         self.submission_enabled = submission_enabled
+        self.adapter_name = adapter_name
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.sglang_chat_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/v1/chat/completions"
         self.sglang_health_url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/health"
@@ -697,7 +698,9 @@ class OpenClawOPDAPIServer:
         forward_body.pop("stream_options", None)
         forward_body["logprobs"] = True
         forward_body["top_logprobs"] = 1
-        if "model" not in forward_body:
+        if self.adapter_name:
+            forward_body["model"] = self.adapter_name
+        elif "model" not in forward_body:
             forward_body["model"] = self.served_model_name
 
         async with httpx.AsyncClient(timeout=None) as client:
@@ -882,6 +885,7 @@ class OpenClawOPDAPIServer:
         sample.index = next(self._index_counter)
         sample.group_index = next(self._group_counter)
         sample.reward = {"score": 1.0}
+        sample.adapter_name = self.adapter_name
 
         logger.info(
             "[OpenClaw-OPD] submitted sample session=%s index=%d prompt_len=%d response_len=%d hint_len=%d",
@@ -985,9 +989,11 @@ class OpenClawOPDAPIServer:
             logger.info("[OpenClaw-OPD] PRM/teacher server ready")
 
         time.sleep(8)
+        adapter_info = f"  adapter: {self.adapter_name}\n" if self.adapter_name else ""
         banner = (
             f"\n{'=' * 70}\n"
             f"  [OpenClaw-OPD] model is ready\n"
+            f"{adapter_info}"
             f"  proxy {self.host}:{self.port} -> SGLang {self.args.sglang_router_ip}:{self.args.sglang_router_port}\n"
             f"  PRM/teacher {self._prm_url} (m={self._prm_m})\n"
             f"{'=' * 70}\n"

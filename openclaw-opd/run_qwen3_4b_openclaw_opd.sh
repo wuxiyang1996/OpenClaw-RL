@@ -34,10 +34,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 SLIME_ROOT="$(cd -- "${SCRIPT_DIR}/../slime" &>/dev/null && pwd)"
 source "${SLIME_ROOT}/scripts/models/qwen3-4B.sh"
 
-HF_CKPT=${HF_CKPT:-/absolute/path/to/Qwen3-4B-Thinking-2507}
+HF_CKPT=${HF_CKPT:-/workspace/OpenClaw-RL/models/Qwen3-4B}
 REF_LOAD=${REF_LOAD:-${HF_CKPT}}
-SAVE_CKPT=${SAVE_CKPT:-/absolute/path/to/OpenClaw-RL/ckpt/qwen3-4b-openclaw-opd}
-PRM_MODEL_PATH=${PRM_MODEL_PATH:-/absolute/path/to/Qwen3-4B-Thinking-2507}
+SAVE_CKPT=${SAVE_CKPT:-/workspace/OpenClaw-RL/ckpt/qwen3-4b-openclaw-opd}
+PRM_MODEL_PATH=${PRM_MODEL_PATH:-/workspace/OpenClaw-RL/models/Qwen3-4B}
 
 export SGLANG_API_KEY="${SGLANG_API_KEY}"
 export SERVED_MODEL_NAME="qwen3-4b"
@@ -59,7 +59,6 @@ CKPT_ARGS=(
    --ref-load "${REF_LOAD}"
    --save "${SAVE_CKPT}"
    --save-interval 100
-   --rotary-base 5000000
 )
 
 ROLLOUT_ARGS=(
@@ -169,7 +168,7 @@ ray start --head --node-ip-address "${MASTER_ADDR}" --num-gpus "${NUM_GPUS}" --d
 
 RUNTIME_ENV_JSON="{
   \"env_vars\": {
-    \"PYTHONPATH\": \"/absolute/path/to/OpenClaw-RL/Megatron-LM/:${SCRIPT_DIR}:${SLIME_ROOT}\",
+    \"PYTHONPATH\": \"/workspace/OpenClaw-RL/Megatron-LM/:${SCRIPT_DIR}:${SLIME_ROOT}\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
     \"OPENCLAW_EVAL_MODE\": \"${OPENCLAW_EVAL_MODE}\"
   }

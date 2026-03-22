@@ -43,6 +43,7 @@ class Sample:
     generate_function_path: str | None = None
     # metadata used during training, e.g., what loss to use for this sample.
     train_metadata: dict | None = None
+    adapter_name: str | None = None  # LoRA adapter name for federated multi-adapter training
 
     non_generation_time: float = 0.0  # time spent in non-generation steps
 

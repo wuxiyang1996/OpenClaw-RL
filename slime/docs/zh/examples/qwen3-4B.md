@@ -65,7 +65,7 @@ source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 ```bash
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
-MODEL_ARGS += ( --rotary-base 10000 )
+MODEL_ARGS+=( --rotary-base 10000 )
 ```
 
 #### CKPT_ARGS

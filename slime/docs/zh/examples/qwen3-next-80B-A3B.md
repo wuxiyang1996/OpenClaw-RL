@@ -1,4 +1,4 @@
-# 8xH100 训练 Qwen3-30B-A3B
+# 8xH100 训练 Qwen3-Next-80B-A3B
 
 ## 环境准备
 

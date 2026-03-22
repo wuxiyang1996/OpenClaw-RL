@@ -47,11 +47,13 @@ API_BASE="${API_BASE:-}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-default}"
 
 # ── Evaluation settings ──
-NUM_PROBLEMS="${NUM_PROBLEMS:-1319}"          # full GSM8K test set
+DIFFICULTY="${DIFFICULTY:-easy}"               # "easy" = openai/gsm8k, "hard" = reasoning-machines/gsm-hard
+NUM_PROBLEMS="${NUM_PROBLEMS:-1319}"          # full test set (both easy and hard have 1319)
+CONCURRENCY="${CONCURRENCY:-32}"              # parallel requests
 TEMPERATURE="${TEMPERATURE:-0.0}"
 MAX_TOKENS="${MAX_TOKENS:-4096}"
-DATASET="${DATASET:-}"                         # empty = HuggingFace; or path to GSM8K.json
-OUTPUT="${OUTPUT:-${SCRIPT_DIR}/results/gsm8k_eval_results.json}"
+DATASET="${DATASET:-}"                         # empty = HuggingFace; or path to local JSON
+OUTPUT="${OUTPUT:-${SCRIPT_DIR}/results/gsm8k_${DIFFICULTY}_eval_results.json}"
 
 export SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1
 
@@ -91,7 +93,9 @@ fi
 
 PYTHON_ARGS+=(
   --served-model-name "${SERVED_MODEL_NAME}"
+  --difficulty "${DIFFICULTY}"
   --num-problems "${NUM_PROBLEMS}"
+  --concurrency "${CONCURRENCY}"
   --temperature "${TEMPERATURE}"
   --max-tokens "${MAX_TOKENS}"
   --output "${OUTPUT}"
@@ -104,6 +108,7 @@ fi
 echo "============================================================"
 echo "  GSM8K Evaluation for OpenClaw-OPD LoRA"
 echo "============================================================"
+echo "  Difficulty:    ${DIFFICULTY}"
 echo "  Base model:    ${MERGED_MODEL:-${HF_CKPT}}"
 echo "  Checkpoint:    ${ADAPTER_PATH:-${CKPT_DIR} (latest)}"
 echo "  Num problems:  ${NUM_PROBLEMS}"

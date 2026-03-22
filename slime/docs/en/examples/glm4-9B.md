@@ -65,7 +65,7 @@ Reads the model's config from [scripts/models/glm4-9B.sh](https://github.com/THU
 ```bash
 source "${SCRIPT_DIR}/models/glm4-9B.sh"
 
-MODEL_ARGS += ( --rotary-base 10000 )
+MODEL_ARGS+=( --rotary-base 10000 )
 ```
 
 #### CKPT\_ARGS

@@ -467,6 +467,20 @@ class SGLangEngine(RayActor):
         response.raise_for_status()
         return response
 
+    def load_lora_adapter(self, adapter_name: str, adapter_path: str):
+        """Ask the SGLang engine to load a LoRA adapter from *adapter_path*."""
+        return self._make_request(
+            "load_lora_adapter",
+            {"lora_name": adapter_name, "lora_path": adapter_path},
+        )
+
+    def unload_lora_adapter(self, adapter_name: str):
+        """Ask the SGLang engine to unload a LoRA adapter."""
+        return self._make_request(
+            "unload_lora_adapter",
+            {"lora_name": adapter_name},
+        )
+
     def simulate_crash(self):
         if self.args.rollout_external or not getattr(self, "process", None):
             logger.info(
@@ -540,6 +554,10 @@ def _compute_server_args(
         kwargs["enable_return_routed_experts"] = True
     if args.fp16:
         kwargs["dtype"] = "float16"
+
+    num_lora_adapters = int(getattr(args, "num_lora_adapters", 1))
+    if num_lora_adapters > 1 and not is_prm:
+        kwargs["max_loras"] = num_lora_adapters
     external_engine_need_check_fields = [k for k in kwargs.keys() if k not in _EXTERNAL_ENGINE_SKIP_CHECK_FIELDS]
 
     unused_keys = set(kwargs.keys())

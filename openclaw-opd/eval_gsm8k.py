@@ -31,6 +31,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -88,44 +89,101 @@ def merge_lora_adapter(base_model: str, adapter: str, output: str) -> str:
     return output
 
 
-def load_gsm8k_dataset(dataset_path: str | None, num_problems: int) -> list[dict]:
-    """Load GSM8K problems. Falls back to HuggingFace if no local file."""
+HF_DATASET_REGISTRY: dict[str, dict] = {
+    "easy": {
+        "repo": "openai/gsm8k",
+        "config": "main",
+        "split": "test",
+        "question_field": "question",
+        "answer_field": "answer",
+        "answer_parse": lambda a: a.split("####")[-1].strip() if "####" in a else a,
+        "label": "GSM8K (easy — original test set)",
+    },
+    "hard": {
+        "repo": "reasoning-machines/gsm-hard",
+        "config": None,
+        "split": "train",
+        "question_field": "input",
+        "answer_field": "target",
+        "answer_parse": lambda a: str(a).strip(),
+        "label": "GSM-Hard (large-number variant)",
+    },
+}
+
+
+def load_gsm8k_dataset(
+    dataset_path: str | None,
+    num_problems: int,
+    fold_index: int = 0,
+    num_folds: int = 1,
+    difficulty: str = "easy",
+) -> list[dict]:
+    """Load GSM8K problems, optionally selecting a specific fold.
+
+    ``difficulty`` selects the HuggingFace dataset variant:
+      - ``"easy"``  → ``openai/gsm8k`` test split (1 319 problems)
+      - ``"hard"``  → ``reasoning-machines/gsm-hard`` train split (1 319 problems,
+        same questions with larger numbers)
+
+    When num_folds > 1, the first ``num_problems`` items are split into
+    ``num_folds`` contiguous chunks and only chunk ``fold_index`` is returned.
+    """
+    spec = HF_DATASET_REGISTRY.get(difficulty)
+    if spec is None:
+        raise ValueError(f"Unknown difficulty {difficulty!r}; choose from {list(HF_DATASET_REGISTRY)}")
+
     if dataset_path and Path(dataset_path).exists():
-        print(f"Loading GSM8K from local file: {dataset_path}")
+        print(f"Loading from local file: {dataset_path}")
         with open(dataset_path, encoding="utf-8") as f:
             data = json.load(f)
-        problems = []
+        q_key = spec["question_field"]
+        a_key = spec["answer_field"]
+        all_problems = []
         for item in data[:num_problems]:
-            problems.append({
-                "question": item["question"],
-                "answer": str(item.get("ground_truth_answer", item.get("answer", ""))),
+            question = item.get(q_key) or item.get("question", "")
+            answer = item.get(a_key) or item.get("answer", item.get("ground_truth_answer", ""))
+            all_problems.append({
+                "question": question,
+                "answer": spec["answer_parse"](str(answer)),
             })
-        return problems
+    else:
+        print(f"Loading {spec['label']} from HuggingFace ({spec['repo']})...")
+        try:
+            from datasets import load_dataset
+            load_args = [spec["repo"]]
+            if spec["config"]:
+                load_args.append(spec["config"])
+            ds = load_dataset(*load_args, split=spec["split"])
+        except Exception:
+            local_json = SCRIPT_DIR / "GSM8K.json"
+            if local_json.exists() and difficulty == "easy":
+                print(f"HuggingFace unavailable, falling back to {local_json}")
+                return load_gsm8k_dataset(str(local_json), num_problems, fold_index, num_folds, difficulty)
+            raise RuntimeError(
+                f"Cannot load {spec['repo']}: install `datasets` or provide --dataset path"
+            )
 
-    print("Loading GSM8K from HuggingFace (openai/gsm8k)...")
-    try:
-        from datasets import load_dataset
-        ds = load_dataset("openai/gsm8k", "main", split="test")
-    except Exception:
-        local_json = SCRIPT_DIR / "GSM8K.json"
-        if local_json.exists():
-            print(f"HuggingFace unavailable, falling back to {local_json}")
-            return load_gsm8k_dataset(str(local_json), num_problems)
-        raise RuntimeError(
-            "Cannot load GSM8K: install `datasets` or provide --dataset path"
-        )
+        q_key = spec["question_field"]
+        a_key = spec["answer_field"]
+        all_problems = []
+        for i, item in enumerate(ds):
+            if i >= num_problems:
+                break
+            all_problems.append({
+                "question": item[q_key],
+                "answer": spec["answer_parse"](str(item[a_key])),
+            })
 
-    problems = []
-    for i, item in enumerate(ds):
-        if i >= num_problems:
-            break
-        answer_text = item["answer"]
-        final_answer = answer_text.split("####")[-1].strip() if "####" in answer_text else answer_text
-        problems.append({
-            "question": item["question"],
-            "answer": final_answer,
-        })
-    return problems
+    if num_folds > 1:
+        n = len(all_problems)
+        fold_size = n // num_folds
+        start = fold_index * fold_size
+        end = start + fold_size if fold_index < num_folds - 1 else n
+        all_problems = all_problems[start:end]
+        print(f"Fold {fold_index}/{num_folds}: problems [{start}, {end}) — {len(all_problems)} items")
+
+    print(f"Loaded {len(all_problems)} problems ({difficulty})")
+    return all_problems
 
 
 def extract_boxed_answer(text: str) -> str | None:
@@ -261,8 +319,11 @@ def generate_response(
         "max_tokens": max_tokens,
     }
 
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    if "/v1/v1/" in url:
+        url = url.replace("/v1/v1/", "/v1/", 1)
     resp = requests.post(
-        f"{base_url}/v1/chat/completions",
+        url,
         json=payload,
         timeout=180,
     )
@@ -325,18 +386,22 @@ def run_evaluation(args):
                 sys.exit(1)
 
         # Step 3: Load GSM8K dataset
-        problems = load_gsm8k_dataset(args.dataset, args.num_problems)
+        fold_index = getattr(args, "fold_index", 0)
+        num_folds = getattr(args, "num_folds", 1)
+        difficulty = getattr(args, "difficulty", "easy")
+        problems = load_gsm8k_dataset(args.dataset, args.num_problems, fold_index, num_folds, difficulty)
         print(f"\nEvaluating on {len(problems)} GSM8K problems\n")
 
-        # Step 4: Run evaluation
+        # Step 4: Run evaluation (concurrent)
         correct = 0
         total = 0
-        results = []
+        results = [None] * len(problems)
+        concurrency = getattr(args, "concurrency", 32)
+        print(f"  Concurrency: {concurrency}\n")
 
-        for i, problem in enumerate(problems):
+        def _eval_one(idx: int, problem: dict) -> dict:
             question = problem["question"]
             ground_truth = problem["answer"]
-
             try:
                 response = generate_response(
                     base_url=base_url,
@@ -346,37 +411,48 @@ def run_evaluation(args):
                     model=args.served_model_name,
                 )
             except Exception as e:
-                print(f"  [{i+1}/{len(problems)}] ERROR: {e}")
-                results.append({"index": i, "correct": False, "error": str(e)})
-                total += 1
-                continue
-
+                return {"index": idx, "correct": False, "error": str(e)}
             is_correct = grade_answer(response, ground_truth)
-            total += 1
-            if is_correct:
-                correct += 1
-
             extracted = extract_boxed_answer(response)
-            status = "CORRECT" if is_correct else "WRONG"
-            print(
-                f"  [{i+1}/{len(problems)}] {status}  "
-                f"predicted={extracted}  truth={ground_truth}"
-            )
-
-            results.append({
-                "index": i,
+            return {
+                "index": idx,
                 "question": question,
                 "ground_truth": ground_truth,
                 "predicted": extracted,
                 "correct": is_correct,
                 "response": response,
-            })
+            }
+
+        done_count = 0
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {pool.submit(_eval_one, i, p): i for i, p in enumerate(problems)}
+            for future in as_completed(futures):
+                idx = futures[future]
+                result = future.result()
+                results[idx] = result
+                done_count += 1
+                total += 1
+                if result.get("correct"):
+                    correct += 1
+                if "error" in result:
+                    print(f"  [{done_count}/{len(problems)}] ERROR (#{idx}): {result['error']}")
+                else:
+                    status = "CORRECT" if result["correct"] else "WRONG"
+                    print(
+                        f"  [{done_count}/{len(problems)}] {status}  "
+                        f"predicted={result.get('predicted')}  truth={result.get('ground_truth')}"
+                    )
+
+        results = [r for r in results if r is not None]
 
         # Step 5: Print summary
         accuracy = correct / total if total > 0 else 0.0
+        diff_spec = HF_DATASET_REGISTRY.get(difficulty, {})
+        diff_label = diff_spec.get("label", difficulty)
         print(f"\n{'='*60}")
         print(f"GSM8K Evaluation Results")
         print(f"{'='*60}")
+        print(f"  Dataset:  {diff_label}")
         print(f"  Model:    {model_path}")
         print(f"  Problems: {total}")
         print(f"  Correct:  {correct}")
@@ -392,6 +468,8 @@ def run_evaluation(args):
 
         summary = {
             "model_path": str(model_path),
+            "difficulty": difficulty,
+            "dataset": diff_label,
             "num_problems": total,
             "num_correct": correct,
             "accuracy": accuracy,
@@ -461,10 +539,17 @@ def main():
 
     eval_group = parser.add_argument_group("Evaluation")
     eval_group.add_argument(
+        "--difficulty", type=str, default="easy", choices=["easy", "hard"],
+        help="Dataset variant: 'easy' = openai/gsm8k (original), 'hard' = reasoning-machines/gsm-hard (larger numbers)",
+    )
+    eval_group.add_argument(
         "--dataset", type=str, default=None,
-        help="Path to local GSM8K JSON file (default: load from HuggingFace)",
+        help="Path to local JSON file (overrides HuggingFace download)",
     )
     eval_group.add_argument("--num-problems", type=int, default=1319, help="Number of test problems (default: full test set)")
+    eval_group.add_argument("--num-folds", type=int, default=1, help="Split problems into N folds (default: 1 = no split)")
+    eval_group.add_argument("--fold-index", type=int, default=0, help="Which fold to evaluate (0-based, used with --num-folds)")
+    eval_group.add_argument("--concurrency", type=int, default=32, help="Number of parallel requests (default: 32)")
     eval_group.add_argument("--temperature", type=float, default=0.0)
     eval_group.add_argument("--max-tokens", type=int, default=4096)
     eval_group.add_argument(

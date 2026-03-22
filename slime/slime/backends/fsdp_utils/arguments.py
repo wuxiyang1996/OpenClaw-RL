@@ -54,6 +54,8 @@ class FSDPArgs:
     lora_dropout: float = 0.0
     lora_target_modules: str | None = None  # comma-separated, e.g. "q_proj,v_proj"
     lora_modules_to_save: str | None = None  # modules kept fully trainable
+    num_lora_adapters: int = 1  # >1 enables multi-adapter (federated) mode
+    lora_adapter_names: str | None = None  # comma-separated, e.g. "lora_a,lora_b"
 
     # Profile
     record_memory_history: bool = False

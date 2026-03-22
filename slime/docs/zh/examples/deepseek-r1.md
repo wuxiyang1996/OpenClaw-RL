@@ -6,7 +6,7 @@
 
 在并行上，sglang 方面我们会启用 ep64，开启 dp attention 与 deepep；megatron 部分我们采用 tp8、pp4、ep32、cp4。
 
-⚠️  为了节省 GPU 显存，我们会使用 CPU Adam，每个 node（8xH100）会占用 1.4~1.5B 内存。如果单机的内存不够，可以通过增加 GPU，扩大并行的方式解决。
+⚠️  为了节省 GPU 显存，我们会使用 CPU Adam，每个 node（8xH100）会占用 1.4~1.5TB 内存。如果单机的内存不够，可以通过增加 GPU，扩大并行的方式解决。
 
 ## 环境准备
 
@@ -60,7 +60,7 @@ bash scripts/run-deepseek-r1.sh
 在其他 node 需要通过如下的指令加入 ray 集群：
 
 ```bash
-ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats"
+ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats
 ```
 
 或者如果你能获取到所有节点的 ip 列表，例如有一个 mpi hostfie（每一行为 `ip slot=8`），那么可以在 `scripts/run-deepseek-r1.sh` 中的 `ray start --head` 指令之后加入如下的指令，从而只需要从 node0 执行训练：
@@ -72,7 +72,7 @@ for WORKER_IP in $(awk '{print $1}' $BASE_DIR/mpi_hostfile); do
   fi
   echo "Starting Ray worker on ${WORKER_IP}"
   ssh root@"${WORKER_IP}" \
-    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats &
 done
 wait
 ```

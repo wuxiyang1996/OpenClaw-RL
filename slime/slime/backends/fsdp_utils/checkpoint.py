@@ -110,9 +110,17 @@ def load(actor: Any) -> dict[str, Any] | None:
 
     # Load model weights (LoRA-only when applicable)
     is_lora = getattr(actor, "_is_lora", False)
+    num_lora_adapters = int(getattr(actor, "_num_lora_adapters", 1))
+    lora_adapter_names: list[str] = list(getattr(actor, "_lora_adapter_names", []))
     adapter_file = model_dir / "adapter_weights.pt"
 
-    if is_lora and adapter_file.exists():
+    if is_lora and num_lora_adapters > 1:
+        try:
+            _load_multi_lora(actor.model, model_dir, lora_adapter_names)
+        except Exception as e:
+            logger.error(f"[FSDP] Failed to load multi-LoRA adapters from {model_dir}: {e}")
+            return None
+    elif is_lora and adapter_file.exists():
         from .lora_utils import load_lora_checkpoint
 
         try:
@@ -200,6 +208,87 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
     dist.barrier()
 
 
+def _load_multi_lora(
+    model: Any,
+    model_dir: Path,
+    adapter_names: list[str],
+) -> None:
+    """Load LoRA weights into a multi-adapter model.
+
+    Handles three checkpoint layouts:
+      1. **Multi-LoRA checkpoint** — sub-dirs ``lora_a/``, ``lora_b/`` inside
+         ``model_dir``, each with ``adapter_weights.pt``.
+      2. **Single-LoRA checkpoint** — a single ``adapter_weights.pt`` at
+         ``model_dir`` level. Weights are duplicated into every adapter.
+      3. **Merged adapter** — produced by ``merge_lora_adapters.py`` with
+         ``default`` adapter name in keys. Remapped and duplicated.
+    """
+    import re
+    from .lora_utils import load_lora_checkpoint
+
+    sub_dirs = {
+        name: model_dir / name
+        for name in adapter_names
+        if (model_dir / name / "adapter_weights.pt").exists()
+    }
+
+    if len(sub_dirs) == len(adapter_names):
+        # Case 1: full multi-LoRA checkpoint
+        for name, adapter_dir in sub_dirs.items():
+            load_lora_checkpoint(model, adapter_dir, adapter_name=name)
+            logger.info(f"[FSDP] Loaded LoRA adapter {name!r} from {adapter_dir}")
+        return
+
+    # Case 2 / 3: single adapter file → duplicate into all adapters
+    adapter_file = model_dir / "adapter_weights.pt"
+    if not adapter_file.exists():
+        logger.warning(f"[FSDP] No adapter weights found in {model_dir}; skipping multi-LoRA load.")
+        return
+
+    if dist.get_rank() == 0:
+        raw_state = torch.load(adapter_file, map_location="cpu", weights_only=True)
+        logger.info(f"[FSDP] Loaded single adapter ({len(raw_state)} tensors) — duplicating into {adapter_names}")
+    else:
+        raw_state = {}
+
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
+
+    for target_name in adapter_names:
+        remapped: dict[str, torch.Tensor] = {}
+        if dist.get_rank() == 0:
+            for key, value in raw_state.items():
+                new_key = re.sub(
+                    r"\.lora_([AB])\.[^.]+\.",
+                    rf".lora_\1.{target_name}.",
+                    key,
+                )
+                remapped[new_key] = value
+
+        model_params = {}
+        for name, param in model.named_parameters():
+            if "lora_" not in name:
+                continue
+            if f".{target_name}." not in name and not name.endswith(f".{target_name}"):
+                continue
+            if name in remapped:
+                model_params[name] = remapped[name]
+
+        if model_params:
+            set_model_state_dict(
+                model,
+                model_params,
+                options=StateDictOptions(
+                    full_state_dict=True,
+                    cpu_offload=True,
+                    broadcast_from_rank0=True,
+                    strict=False,
+                ),
+            )
+            logger.info(f"[FSDP] Duplicated adapter weights into {target_name!r} ({len(model_params)} params)")
+
+    dist.barrier()
+
+
 def save(actor: Any, iteration: int) -> None:
     """Save checkpoint to disk.
 
@@ -265,5 +354,46 @@ def save(actor: Any, iteration: int) -> None:
         tracker_file = base_dir / "latest_checkpointed_iteration.txt"
         tracker_file.write_text(str(step_id))
         logger.info(f"[FSDP] Saved checkpoint to {checkpoint_dir}")
+
+    dist.barrier()
+
+
+def save_multi_lora(actor: Any, iteration: int, adapter_names: list[str]) -> None:
+    """Save each named LoRA adapter to its own subdirectory."""
+    from .lora_utils import save_lora_checkpoint
+
+    torch.cuda.synchronize()
+
+    base_dir = Path(actor.args.save).expanduser()
+    step_id = iteration + 1
+    checkpoint_dir = base_dir / f"iter_{step_id:07d}"
+    model_dir = checkpoint_dir / "model"
+
+    if dist.get_rank() == 0:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        model_dir.mkdir(parents=True, exist_ok=True)
+    dist.barrier()
+
+    for name in adapter_names:
+        adapter_dir = model_dir / name
+        actor.model.set_adapter(name)
+        save_lora_checkpoint(actor.model, adapter_dir, adapter_name=name)
+
+    if dist.get_rank() == 0:
+        metadata = {
+            "iteration": step_id,
+            "rollout_id": iteration,
+            "next_rollout_id": iteration + 1,
+            "global_step": actor.global_step,
+            "micro_step": actor.micro_step,
+            "world_size": dist.get_world_size(),
+            "timestamp": time.time(),
+            "adapter_names": adapter_names,
+        }
+        _write_checkpoint_metadata(checkpoint_dir / "meta.json", metadata)
+
+        tracker_file = base_dir / "latest_checkpointed_iteration.txt"
+        tracker_file.write_text(str(step_id))
+        logger.info("[FSDP] Saved multi-LoRA checkpoint (%s) to %s", adapter_names, checkpoint_dir)
 
     dist.barrier()

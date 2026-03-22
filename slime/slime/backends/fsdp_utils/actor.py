@@ -106,10 +106,29 @@ class FSDPTrainRayActor(TrainRayActor):
 
         # Apply LoRA adapters before FSDP wrapping
         self._is_lora = getattr(self.args, "use_lora", False)
+        self._num_lora_adapters = int(getattr(self.args, "num_lora_adapters", 1))
+        self._lora_adapter_names: list[str] = []
         if self._is_lora:
-            from .lora_utils import apply_lora, propagate_no_split_modules
+            from .lora_utils import (
+                add_lora_adapter,
+                apply_lora,
+                propagate_no_split_modules,
+                set_all_lora_requires_grad,
+            )
 
-            model = apply_lora(model, self.args)
+            if self._num_lora_adapters > 1:
+                raw_names = getattr(self.args, "lora_adapter_names", None) or ""
+                names = [n.strip() for n in raw_names.split(",") if n.strip()]
+                if len(names) < self._num_lora_adapters:
+                    names = [f"lora_{chr(ord('a') + i)}" for i in range(self._num_lora_adapters)]
+                self._lora_adapter_names = names[:self._num_lora_adapters]
+                model = apply_lora(model, self.args, adapter_name=self._lora_adapter_names[0])
+                for name in self._lora_adapter_names[1:]:
+                    add_lora_adapter(model, self.args, adapter_name=name)
+                model.set_adapter(self._lora_adapter_names[0])
+                set_all_lora_requires_grad(model, True)
+            else:
+                model = apply_lora(model, self.args)
             model = propagate_no_split_modules(model)
 
         full_state = model.state_dict()
@@ -337,7 +356,10 @@ class FSDPTrainRayActor(TrainRayActor):
             return
 
         assert not self.args.async_save, "FSDPTrainRayActor does not support async_save yet."
-        checkpoint.save(self, rollout_id)
+        if self._is_lora and self._num_lora_adapters > 1:
+            checkpoint.save_multi_lora(self, rollout_id, self._lora_adapter_names)
+        else:
+            checkpoint.save(self, rollout_id)
 
     def _compute_log_prob(
         self,
@@ -539,6 +561,10 @@ class FSDPTrainRayActor(TrainRayActor):
             )
 
     def _train_core(self, rollout_id: int, rollout_data) -> None:
+        if self._is_lora and self._num_lora_adapters > 1 and "adapter_names" in rollout_data:
+            self._train_core_multi_adapter(rollout_id, rollout_data)
+            return
+
         if self.args.advantage_estimator in ["grpo", "gspo"]:
             rollout_data["advantages"] = rollout_data["returns"] = [
                 torch.tensor([rollout_data["rewards"][i]] * rollout_data["response_lengths"][i])
@@ -593,6 +619,152 @@ class FSDPTrainRayActor(TrainRayActor):
                 actor_state = self.model.state_dict()
             self.ref_model.load_state_dict(actor_state)
             self.ref_model.cpu()
+
+    def _split_rollout_by_adapter(self, rollout_data: dict) -> dict[str, dict]:
+        """Split a rollout data dict into per-adapter subsets based on ``adapter_names``."""
+        adapter_names = rollout_data["adapter_names"]
+        indices_by_adapter: dict[str, list[int]] = {}
+        for i, name in enumerate(adapter_names):
+            indices_by_adapter.setdefault(name, []).append(i)
+
+        list_keys = {
+            k for k, v in rollout_data.items()
+            if isinstance(v, list) and len(v) == len(adapter_names) and k != "adapter_names"
+        }
+
+        result: dict[str, dict] = {}
+        for adapter_name, idxs in indices_by_adapter.items():
+            subset = {}
+            for k, v in rollout_data.items():
+                if k == "adapter_names":
+                    continue
+                if k in list_keys:
+                    subset[k] = [v[i] for i in idxs]
+                else:
+                    subset[k] = v
+            result[adapter_name] = subset
+        return result
+
+    def _train_core_multi_adapter(self, rollout_id: int, rollout_data) -> None:
+        """Train multiple LoRA adapters in a single training step.
+
+        For each adapter: set_adapter → forward/backward, then a single
+        optimizer.step() updates all adapters that received gradients.
+        """
+        from .lora_utils import set_all_lora_requires_grad
+
+        per_adapter = self._split_rollout_by_adapter(rollout_data)
+        all_packed: dict[str, tuple[list, list]] = {}
+        for adapter_name, subset in per_adapter.items():
+            if self.args.advantage_estimator in ["grpo", "gspo"]:
+                subset["advantages"] = subset["returns"] = [
+                    torch.tensor([subset["rewards"][i]] * subset["response_lengths"][i])
+                    for i in range(len(subset["rewards"]))
+                ]
+            else:
+                raise NotImplementedError(f"Unsupported advantage_estimator {self.args.advantage_estimator}")
+            packed_batches, grad_accum = self._packed_data(subset)
+            all_packed[adapter_name] = (packed_batches, grad_accum)
+
+        with timer("actor_train"):
+            self.optimizer.zero_grad(set_to_none=True)
+
+            for adapter_name in self._lora_adapter_names:
+                if adapter_name not in all_packed:
+                    continue
+                packed_batches, grad_accum = all_packed[adapter_name]
+                if not packed_batches:
+                    continue
+
+                self.model.set_adapter(adapter_name)
+                set_all_lora_requires_grad(self.model, True)
+
+                if self.ref_model is not None:
+                    self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
+                self._compute_log_prob("actor", packed_batches)
+
+                reported_accum: dict[str, list[torch.Tensor]] = {}
+                for mbs_id, packed_batch in enumerate(
+                    tqdm(packed_batches, desc=f"actor_train/{adapter_name}", disable=dist.get_rank() != 0)
+                ):
+                    self._train_step_no_optim(
+                        packed_batch=packed_batch,
+                        reported_accum=reported_accum,
+                        adapter_name=adapter_name,
+                    )
+
+                if dist.get_rank() == 0:
+                    aggregated = {k: torch.stack(v).sum().item() for k, v in reported_accum.items()}
+                    logger.info(f"rollout {rollout_id} adapter {adapter_name}: {aggregated}")
+
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad)
+            self.optimizer.step()
+            self.lr_scheduler.step()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            if dist.get_rank() == 0:
+                log_dict = {
+                    "train/grad_norm": float(grad_norm),
+                    "train/step": self.global_step,
+                }
+                lr_values = self.lr_scheduler.get_last_lr()
+                for gid, _group in enumerate(self.optimizer.param_groups):
+                    log_dict[f"train/lr-pg_{gid}"] = lr_values[gid]
+                logger.info(f"multi-adapter step {self.global_step}: {log_dict}")
+                logging_utils.log(self.args, log_dict, step_key="train/step")
+
+            self.global_step += 1
+
+        self.prof.step(rollout_id=rollout_id)
+
+    def _train_step_no_optim(self, packed_batch, reported_accum, adapter_name=""):
+        """Forward + backward without optimizer step (used by multi-adapter training)."""
+        model_args = self._get_model_inputs_args(packed_batch)
+        logits = self.model(**model_args).logits.squeeze(0).float()
+
+        need_entropy = self.args.entropy_coef != 0.0
+        log_probs, entropy_result = get_logprob_and_entropy(
+            logits=logits,
+            target_tokens=packed_batch["tokens"],
+            allow_compile=not self.args.true_on_policy_mode,
+            temperature=self.args.rollout_temperature,
+            compute_entropy=need_entropy,
+        )
+        packed_batch["cur_log_probs"] = log_probs
+        packed_batch["entropy"] = entropy_result
+
+        unpacked_batches = unpack_sequences(packed_batch)
+
+        old_log_prob_key = "rollout_log_probs" if self.args.use_rollout_logprobs else "log_probs"
+        old_log_probs = torch.cat([batch[old_log_prob_key] for batch in unpacked_batches], dim=0)
+        log_probs = torch.cat([batch["cur_log_probs"] for batch in unpacked_batches], dim=0)
+        advantages = torch.cat([batch["advantages"] for batch in unpacked_batches], dim=0)
+        loss_masks = [batch["loss_masks"].to(device=log_probs.device) for batch in unpacked_batches]
+        response_lengths = [batch["response_lengths"] for batch in unpacked_batches]
+
+        advantages = advantages.to(device=log_probs.device)
+        old_log_probs = old_log_probs.to(device=log_probs.device)
+        ppo_kl = old_log_probs - log_probs
+
+        pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, self.args.eps_clip, self.args.eps_clip_high)
+        entropy = torch.cat([batch["entropy"] for batch in unpacked_batches], dim=0)
+        entropy_loss = sum_of_sample_mean(entropy, response_lengths, loss_masks)
+
+        if self.args.calculate_per_token_loss:
+            pg_loss = sum_of_token(pg_loss, response_lengths, loss_masks)
+        else:
+            pg_loss = sum_of_sample_mean(pg_loss, response_lengths, loss_masks)
+
+        loss = pg_loss - self.args.entropy_coef * entropy_loss
+        loss = loss * self.dp_size / self.args.global_batch_size
+        loss.backward()
+
+        reported = {
+            f"{adapter_name}/loss": loss.detach(),
+            f"{adapter_name}/pg_loss": pg_loss.detach(),
+        }
+        for k, v in reported.items():
+            reported_accum.setdefault(k, []).append(v)
 
     def _train_step(self, packed_batch, reported_accum, mbs_id, grad_accum):
         # Prepare model inputs
@@ -775,6 +947,10 @@ class FSDPTrainRayActor(TrainRayActor):
 
         Handles both colocated and distributed update modes. In offload mode,
         wakes up parameters as needed to perform the update.
+
+        Multi-LoRA mode: instead of merging LoRA into base weights, each adapter
+        is saved to a temporary directory and SGLang is told to reload them via
+        its native multi-LoRA endpoints.
         """
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
@@ -788,15 +964,16 @@ class FSDPTrainRayActor(TrainRayActor):
             if dist.get_rank() == 0:
                 ray.get(self.rollout_manager.clear_num_new_engines.remote())
 
-        # Merge LoRA into base weights before syncing to SGLang rollout engines.
-        # SGLang doesn't understand LoRA adapters, so it needs the merged model.
-        if self._is_lora:
-            self.model.merge_adapter()
-        try:
-            self.weight_updater.update_weights()
-        finally:
+        if self._is_lora and self._num_lora_adapters > 1:
+            self._sync_multi_lora_adapters(rollout_engines)
+        else:
             if self._is_lora:
-                self.model.unmerge_adapter()
+                self.model.merge_adapter()
+            try:
+                self.weight_updater.update_weights()
+            finally:
+                if self._is_lora:
+                    self.model.unmerge_adapter()
 
         if self.args.ci_test and len(rollout_engines) > 0:
             engine = random.choice(rollout_engines)
@@ -807,6 +984,39 @@ class FSDPTrainRayActor(TrainRayActor):
                 )
 
         clear_memory()
+
+    def _sync_multi_lora_adapters(self, rollout_engines) -> None:
+        """Save each adapter to a temp dir and tell SGLang engines to reload them."""
+        import tempfile
+        from pathlib import Path
+
+        from .lora_utils import save_lora_checkpoint
+
+        base_tmp = Path(tempfile.gettempdir()) / "slime_lora_adapters"
+        for adapter_name in self._lora_adapter_names:
+            self.model.set_adapter(adapter_name)
+            adapter_dir = base_tmp / adapter_name
+            save_lora_checkpoint(self.model, adapter_dir, adapter_name=adapter_name)
+            if dist.get_rank() == 0:
+                for engine in rollout_engines:
+                    try:
+                        ray.get(engine.load_lora_adapter.remote(adapter_name, str(adapter_dir)))
+                    except Exception as e:
+                        logger.warning("Failed to sync adapter %s to engine: %s", adapter_name, e)
+
+        self.weight_updater.weight_version += 1
+
+    def set_active_adapter(self, adapter_name: str) -> None:
+        """Switch the active LoRA adapter for the next forward pass."""
+        if not self._is_lora or self._num_lora_adapters <= 1:
+            return
+        self.model.set_adapter(adapter_name)
+        from .lora_utils import set_all_lora_requires_grad
+        set_all_lora_requires_grad(self.model, True)
+
+    def get_lora_adapter_names(self) -> list[str]:
+        """Return the list of adapter names (empty if not multi-LoRA)."""
+        return list(self._lora_adapter_names)
 
     def _create_ref_model(self, ref_load_path: str | None):
         """Create and initialize a separate reference model with FSDP2 CPUOffloadPolicy.

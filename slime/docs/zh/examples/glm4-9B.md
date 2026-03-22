@@ -44,7 +44,7 @@ PYTHONPATH=/root/Megatron-LM python tools/convert_hf_to_torch_dist.py \
 
 ```bash
 cd /root/slime
-bash script/run-glm4-9B.sh
+bash scripts/run-glm4-9B.sh
 ```
 
 ### 参数简介
@@ -65,7 +65,7 @@ source "${SCRIPT_DIR}/models/glm4-9B.sh"
 ```bash
 source "${SCRIPT_DIR}/models/glm4-9B.sh"
 
-MODEL_ARGS += ( --rotary-base 10000 )
+MODEL_ARGS+=( --rotary-base 10000 )
 ```
 
 #### CKPT_ARGS

@@ -16,13 +16,9 @@ import torch.distributed as dist
 logger = logging.getLogger(__name__)
 
 
-def apply_lora(model: torch.nn.Module, args: Namespace) -> torch.nn.Module:
-    """Wrap *model* with PEFT LoRA adapters according to *args*.
-
-    Returns the PeftModel wrapper.  All base-model parameters are frozen;
-    only the LoRA parameters are trainable.
-    """
-    from peft import LoraConfig, get_peft_model
+def _build_lora_config(args: Namespace):
+    """Build a ``LoraConfig`` from CLI arguments."""
+    from peft import LoraConfig
 
     target_modules = None
     if args.lora_target_modules:
@@ -32,7 +28,7 @@ def apply_lora(model: torch.nn.Module, args: Namespace) -> torch.nn.Module:
     if args.lora_modules_to_save:
         modules_to_save = [m.strip() for m in args.lora_modules_to_save.split(",")]
 
-    lora_config = LoraConfig(
+    return LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
@@ -42,12 +38,50 @@ def apply_lora(model: torch.nn.Module, args: Namespace) -> torch.nn.Module:
         task_type="CAUSAL_LM",
     )
 
-    model = get_peft_model(model, lora_config)
+
+def apply_lora(
+    model: torch.nn.Module,
+    args: Namespace,
+    adapter_name: str = "default",
+) -> torch.nn.Module:
+    """Wrap *model* with PEFT LoRA adapters according to *args*.
+
+    Returns the PeftModel wrapper.  All base-model parameters are frozen;
+    only the LoRA parameters are trainable.
+    """
+    from peft import get_peft_model
+
+    lora_config = _build_lora_config(args)
+    model = get_peft_model(model, lora_config, adapter_name=adapter_name)
 
     if dist.get_rank() == 0:
         model.print_trainable_parameters()
 
     return model
+
+
+def add_lora_adapter(
+    model: torch.nn.Module,
+    args: Namespace,
+    adapter_name: str = "lora_b",
+) -> None:
+    """Add an additional named LoRA adapter to an existing PeftModel."""
+    lora_config = _build_lora_config(args)
+    model.add_adapter(adapter_name, lora_config)
+    if dist.get_rank() == 0:
+        logger.info("Added LoRA adapter %r", adapter_name)
+
+
+def set_all_lora_requires_grad(model: torch.nn.Module, requires_grad: bool = True) -> None:
+    """Force ``requires_grad`` on every LoRA parameter regardless of the active adapter.
+
+    PEFT's ``set_adapter`` toggles requires_grad per-adapter.  When training
+    multiple adapters in the same optimizer, we keep them all trainable and
+    rely on the forward graph to route gradients only to the active adapter.
+    """
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            param.requires_grad_(requires_grad)
 
 
 def propagate_no_split_modules(model: torch.nn.Module) -> torch.nn.Module:
@@ -73,49 +107,60 @@ def propagate_no_split_modules(model: torch.nn.Module) -> torch.nn.Module:
     return model
 
 
-def save_lora_checkpoint(model: torch.nn.Module, path: Path) -> None:
+def save_lora_checkpoint(
+    model: torch.nn.Module,
+    path: Path,
+    adapter_name: str | None = None,
+) -> None:
     """Save only the LoRA adapter weights + config to *path*.
 
+    When *adapter_name* is given, only keys belonging to that adapter are saved.
     Only rank 0 writes to disk.  All ranks participate in the state-dict
     gathering (handled by FSDP through ``state_dict()``).
     """
     from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 
-    # Gather full state dict (FSDP2 sharded -> full)
     full_state = get_model_state_dict(
         model,
         options=StateDictOptions(full_state_dict=True, cpu_offload=True),
     )
 
     if dist.get_rank() == 0:
-        # Filter to only LoRA keys
         lora_state = {k: v for k, v in full_state.items() if "lora_" in k}
+        if adapter_name is not None:
+            lora_state = {
+                k: v for k, v in lora_state.items()
+                if f".{adapter_name}." in k or k.endswith(f".{adapter_name}")
+            }
         path.mkdir(parents=True, exist_ok=True)
         torch.save(lora_state, path / "adapter_weights.pt")
 
-        # Save the PEFT config so we can reload
         if hasattr(model, "peft_config"):
             import json
 
-            for adapter_name, cfg in model.peft_config.items():
-                cfg_dict = cfg.to_dict()
-                # Convert sets to sorted lists for JSON serialization
+            target_cfg_name = adapter_name or next(iter(model.peft_config), None)
+            if target_cfg_name and target_cfg_name in model.peft_config:
+                cfg_dict = model.peft_config[target_cfg_name].to_dict()
                 for k, v in cfg_dict.items():
                     if isinstance(v, set):
                         cfg_dict[k] = sorted(v)
                 with open(path / "adapter_config.json", "w") as f:
                     json.dump(cfg_dict, f, indent=2)
-                break  # Only save the first (default) adapter
 
-        logger.info(f"Saved LoRA adapter ({len(lora_state)} tensors) to {path}")
+        logger.info(f"Saved LoRA adapter {adapter_name!r} ({len(lora_state)} tensors) to {path}")
 
     dist.barrier()
 
 
-def load_lora_checkpoint(model: torch.nn.Module, path: Path) -> None:
+def load_lora_checkpoint(
+    model: torch.nn.Module,
+    path: Path,
+    adapter_name: str | None = None,
+) -> None:
     """Load LoRA adapter weights from *path* into *model*.
 
-    Broadcasts from rank 0 to all other ranks.
+    When *adapter_name* is given, only parameters matching that adapter name
+    are loaded.  Broadcasts from rank 0 to all other ranks.
     """
     from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
@@ -130,12 +175,14 @@ def load_lora_checkpoint(model: torch.nn.Module, path: Path) -> None:
     else:
         lora_state = {}
 
-    # Build a full state dict with LoRA weights overlaid
     full_state = {}
     for name, param in model.named_parameters():
-        if "lora_" in name:
-            if name in lora_state:
-                full_state[name] = lora_state[name]
+        if "lora_" not in name:
+            continue
+        if adapter_name is not None and f".{adapter_name}." not in name and not name.endswith(f".{adapter_name}"):
+            continue
+        if name in lora_state:
+            full_state[name] = lora_state[name]
 
     if full_state:
         set_model_state_dict(

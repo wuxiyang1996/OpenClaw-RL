@@ -61,7 +61,7 @@ bash scripts/run-deepseek-r1.sh
 On other nodes, you need to join the Ray cluster with the following command:
 
 ```bash
-ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats"
+ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats
 ```
 
 Alternatively, if you have a list of all node IPs, for example, an MPI hostfile (where each line is `ip slot=8`), you can add the following commands after the `ray start --head` command in `scripts/run-deepseek-r1.sh`. This allows you to execute the training entirely from node0:
@@ -73,7 +73,7 @@ for WORKER_IP in $(awk '{print $1}' $BASE_DIR/mpi_hostfile); do
   fi
   echo "Starting Ray worker on ${WORKER_IP}"
   ssh root@"${WORKER_IP}" \
-    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats &
 done
 wait
 ```
@@ -177,7 +177,7 @@ The final `--sglang-server-concurrency` is a parameter specific to slime. It is 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 64
    --sglang-mem-fraction-static 0.7
-   ----sglang-ep-size 64
+   --sglang-ep-size 64
 
    # dp attention
    --sglang-enable-dp-attention

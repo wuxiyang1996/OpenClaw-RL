@@ -586,7 +586,28 @@ bash ../openclaw-opd/run_qwen3_4b_openclaw_opd_topk_lora.sh
 
 ## Key Files Modified
 
+### Initial setup / environment fixes
+
 | File | Change |
 |------|--------|
-| `slime/slime/backends/fsdp_utils/arguments.py` | Default `attn_implementation` changed from `flash_attention_2` to `sdpa` |
+| `slime/slime/backends/fsdp_utils/arguments.py` | Default `attn_implementation` changed from `flash_attention_2` to `sdpa`; added `num_lora_adapters` and `lora_adapter_names` fields |
 | `openclaw-opd/run_qwen3_4b_openclaw_opd_topk_lora.sh` | Default `ATTN_IMPL` → `sdpa`; `TOOL_CALL_PARSER` → `qwen`; added `SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK=1` to both script and `RUNTIME_ENV_JSON` |
+
+### Federated dual-LoRA feature
+
+See [`federated-dual-lora-patches.md`](federated-dual-lora-patches.md) for
+full details on each patch. Summary of changed files:
+
+| File | Change |
+|------|--------|
+| `slime/slime/backends/fsdp_utils/lora_utils.py` | Multi-adapter LoRA utilities: `add_lora_adapter`, `set_all_lora_requires_grad`, adapter-specific save/load |
+| `slime/slime/backends/fsdp_utils/actor.py` | Multi-adapter init, training (`_train_core_multi_adapter`), adapter-only weight sync, multi-adapter checkpointing |
+| `slime/slime/backends/fsdp_utils/checkpoint.py` | `save_multi_lora()` for per-adapter checkpoint saving |
+| `slime/slime/backends/sglang_utils/sglang_engine.py` | `load_lora_adapter` / `unload_lora_adapter` methods; `max_loras` in server args |
+| `slime/slime/utils/types.py` | `adapter_name` field on `Sample` |
+| `slime/slime/ray/rollout.py` | Propagate `adapter_names` through data pipeline and DP splitting |
+| `openclaw-opd/openclaw_opd_api_server.py` | Adapter-aware request routing via `"model": adapter_name` |
+| `openclaw-opd/openclaw_opd_rollout.py` | Dual API servers with separate queues; federated queue draining |
+| `slime/train_async_federated.py` | New entry point for federated training |
+| `openclaw-opd/run_qwen3_4b_openclaw_opd_topk_dual_lora.sh` | Single 4-GPU Ray job with `PORT_A`/`PORT_B` and `--num-lora-adapters 2` |
+| `openclaw-opd/README-federated-opd.md` | User-facing documentation for the dual-LoRA feature |

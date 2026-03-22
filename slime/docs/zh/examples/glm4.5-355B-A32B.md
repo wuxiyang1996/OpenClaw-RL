@@ -41,7 +41,7 @@ bash scripts/run-glm4.5-355B-A32B.sh
 在其他 node 需要通过如下的指令加入 ray 集群：
 
 ```bash
-ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats"
+ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats
 ```
 
 或者如果你能获取到所有节点的 ip 列表，例如有一个 mpi hostfie（每一行为 `ip slot=8`），那么可以在 `scripts/run-glm4.5-355B-A32B.sh` 中的 `ray start --head` 指令之后加入如下的指令，从而只需要从 node0 执行训练：
@@ -53,7 +53,7 @@ for WORKER_IP in $(awk '{print $1}' $BASE_DIR/mpi_hostfile); do
   fi
   echo "Starting Ray worker on ${WORKER_IP}"
   ssh root@"${WORKER_IP}" \
-    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats &
 done
 wait
 ```

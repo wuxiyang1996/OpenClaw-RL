@@ -65,7 +65,7 @@ This reads the model's configuration from [scripts/models/qwen3-4B.sh](https://g
 ```bash
 source "${SCRIPT_DIR}/models/qwen3-4B.sh"
 
-MODEL_ARGS += ( --rotary-base 10000 )
+MODEL_ARGS+=( --rotary-base 10000 )
 ```
 
 #### CKPT\_ARGS

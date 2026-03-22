@@ -42,10 +42,10 @@ bash scripts/run-glm4.5-355B-A32B.sh
 On other nodes, you need to join the Ray cluster with the following command:
 
 ```bash
-ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats"
+ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats
 ```
 
-Alternatively, if you have a list of all node IPs, for example, an MPI hostfile (where each line is `ip slot=8`), you can add the following commands after the `ray start --head` command in `scripts/run-glm4.5-355B-A32B.sh.sh`. This allows you to execute the training entirely from node0:
+Alternatively, if you have a list of all node IPs, for example, an MPI hostfile (where each line is `ip slot=8`), you can add the following commands after the `ray start --head` command in `scripts/run-glm4.5-355B-A32B.sh`. This allows you to execute the training entirely from node0:
 
 ```bash
 for WORKER_IP in $(awk '{print $1}' $BASE_DIR/mpi_hostfile); do
@@ -54,7 +54,7 @@ for WORKER_IP in $(awk '{print $1}' $BASE_DIR/mpi_hostfile); do
   fi
   echo "Starting Ray worker on ${WORKER_IP}"
   ssh root@"${WORKER_IP}" \
-    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats" &
+    "pkill -9 sglang ; ray stop --force ; pkill -9 python ; ray start --address=${MASTER_ADDR}:6379 --num-gpus 8 --node-ip-address ${WORKER_IP} --disable-usage-stats &
 done
 wait
 ```
